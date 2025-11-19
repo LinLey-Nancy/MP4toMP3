@@ -3,9 +3,14 @@ import subprocess
 import sys
 import threading, queue, subprocess, os, sys
 from tkinter import ttk, filedialog, messagebox
+from tkinterdnd2 import *
 import tkinter as tk
 # 全局变量，存储选择的文件夹路径
 folder_path = ""
+# 任务队列
+job_q = queue.Queue()
+# 结果队列
+result_q = queue.Queue()
 
 # 获取打包后的文件路径
 def resource_path(rel):
@@ -33,9 +38,6 @@ def select_folder():
         
 
 
-job_q = queue.Queue()         # 任务队列
-result_q = queue.Queue()      # 结果队列
-
 def worker():
     while True:
         folder = job_q.get()          # 阻塞等待任务
@@ -56,7 +58,7 @@ def worker():
                     creationflags=subprocess.CREATE_NO_WINDOW)
             except subprocess.CalledProcessError:
                 pass
-            result_q.put(int((i+1)/total*100))   # 回传进度百分比
+            result_q.put(int((i + 1) / total * 100))
         result_q.put("done")                     # 通知完成
 
 threading.Thread(target=worker, daemon=True).start()
@@ -83,13 +85,42 @@ def start_convert():
     job_q.put(folder_path)     # 把任务丢给线程
     poll_progress()            # 开始轮询进度
 
+
 # ----------------- GUI -----------------
 
-root = tk.Tk()
+root = TkinterDnD.Tk()
 root.title("视频转MP3")
 root.geometry("400x160")
 root.resizable(False, False)
 
+# 拖拽文件夹
+root.drop_target_register(DND_FILES)
+root.dnd_bind('<<Drop>>', lambda event: on_drop_event(event))
+
+def on_drop_event(event):
+    path = event.data
+
+    # Windows 会把路径用 {} 包起来，或者多个路径用空格分隔
+    if path.startswith('{') and path.endswith('}'):
+        path = path[1:-1]
+    else:
+        # 可能拖了多个，只取第一个
+        path = path.split()[0]
+    
+    # 去掉多余的引号或大括号
+    path = path.strip('{}"\'').replace('\\', '/')
+
+    if os.path.isdir(path):
+        global folder_path
+        folder_path = path
+
+        video_ext = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts")
+        total = sum(1 for f in os.listdir(folder_path) if f.lower().endswith(video_ext))
+        label_path.config(text=f"{folder_path}  \n（共 {total} 个视频文件）", justify="center")
+        btn_main.config(state="normal", text="开始转换", 
+                        command=lambda: start_convert(), style="Accent.TButton")
+    else:
+        messagebox.showwarning("不是文件夹", "请拖拽一个包含视频的文件夹进来喵~")
 
 btn_main = ttk.Button(
     root,
@@ -100,10 +131,19 @@ btn_main = ttk.Button(
 )
 btn_main.pack(pady=15)
 
-label_path = ttk.Label(root, text="还没选从哪里开始转换呢", anchor="center")
+label_path = ttk.Label(root, text="丢一个文件夹进来也可以哦~", anchor="center")
 label_path.pack(fill="x", padx=20, pady=5)
 
 progress = ttk.Progressbar(root, length=360, mode="determinate")
 progress.pack(pady=10)
+
+# 关闭窗口时的确认提示
+def on_closing():
+    if messagebox.askyesno("退出程序", "\n如果正在转换，任务会中断哦~"):
+        root.destroy() 
+        # 结束所有线程 防止占用
+        os._exit(0)
+
+root.protocol("WM_DELETE_WINDOW", on_closing)
 
 root.mainloop()
