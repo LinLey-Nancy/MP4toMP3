@@ -1,0 +1,1 @@
+pyinstaller --onefile --windowed --add-binary "ffmpeg.exe;." main.py
