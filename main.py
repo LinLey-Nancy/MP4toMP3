@@ -9,7 +9,7 @@ def resource_path(relative_path):
     try:
         base_path = sys._MEIPASS
     except AttributeError:
-        base_path = os.path.abspath(".")
+        base_path = os.path.dirname(os.path.abspath(__file__))  
     return os.path.join(base_path, relative_path)
 
 def convert_folder(input_folder):
@@ -46,6 +46,6 @@ def select_folder():
 root = tk.Tk()
 root.title("视频转MP3 便携版")
 root.geometry("300x100")
-btn = tk.Button(root, text="选择文件夹→批量转MP3", command=select_folder)
+btn = tk.Button(root, text="点击选择文件夹", command=select_folder)
 btn.pack(expand=True)
 root.mainloop()
