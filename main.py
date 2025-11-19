@@ -33,52 +33,6 @@ def select_folder():
         
 
 
-# 转换函数
-"""
-
-def convert_folder(input_folder):
-    # 未选择警告
-    if not input_folder:
-        messagebox.showwarning("请先选择一个文件夹")
-        return
-    btn_main.config(state="disabled")
-    progress["value"] = 0
-
-    # 获取ffmpeg路径 创建输出文件夹
-    ffmpeg_path = resource_path("ffmpeg.exe")
-    out_folder = os.path.join(input_folder, "转换后的MP3文件")
-    os.makedirs(out_folder, exist_ok=True)
-    video_ext = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv", ".m4v", ".ts")
-    
-    # 统计转换成功的文件数
-    count = 0
-    
-    # 目录下没有视频文件警告
-    files = [f for f in os.listdir(input_folder) if f.lower().endswith(video_ext)]
-    total = len(files)
-    if not total:
-        messagebox.showinfo("提示", "目录下没有视频文件")
-        btn_main.config(state="normal")
-        return
-
-    # 转换主程序
-    for file in os.listdir(input_folder):
-        if file.lower().endswith(video_ext):
-            in_path  = os.path.join(input_folder, file)
-            out_path = os.path.join(out_folder, f"{os.path.splitext(file)[0]}.mp3")
-            try:
-                subprocess.run(
-                    [ffmpeg_path, "-i", in_path, "-q:a", "0", "-map", "a", out_path],
-                    check=True,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL
-                )
-                count += 1
-            except subprocess.CalledProcessError:
-                continue   # 跳过有问题的文件
-
-    messagebox.showinfo("完成", f"共转换 {count} 个文件\n已保存到 {folder_path}/mp3_output 文件夹")
-"""
 job_q = queue.Queue()         # 任务队列
 result_q = queue.Queue()      # 结果队列
 
