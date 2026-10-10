@@ -1,6 +1,7 @@
 import os
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # 国内镜像兜底
+os.environ.setdefault("HF_HUB_DISABLE_XET", "1")  # xet 通道弱网静默挂死，强制走普通下载
 
 from faster_whisper import WhisperModel
 
