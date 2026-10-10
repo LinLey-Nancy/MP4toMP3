@@ -1,6 +1,7 @@
 import os
 import queue
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -12,6 +13,11 @@ from tkinterdnd2 import DND_FILES, TkinterDnD
 VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
              ".m4v", ".ts", ".webm", ".mpeg", ".mpg", ".3gp")
 OUTPUT_DIR = "mp3_output"
+TRANSCRIPT_DIR = "transcript_output"
+
+PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
+TEMP_DIR = os.path.join(PROJECT_ROOT, "temp")
 
 COLOR_IDLE = "#666666"
 COLOR_BUSY = "#2b6cb0"
@@ -27,6 +33,7 @@ cancel_requested = False
 current_proc = None   # 正在运行的 ffmpeg 子进程，取消/退出时用来终止
 current_out = None    # 正在输出的文件，取消/退出时清理半成品
 job_token = 0         # 每次转换 +1，让旧的进度轮询自动失效
+conv_summary = ()     # 转写阶段用于拼完成提示的 (ok, failed, total)
 
 job_q = queue.Queue()
 result_q = queue.Queue()
@@ -41,6 +48,10 @@ progress = None
 btn_pick = None
 btn_main = None
 btn_cancel = None
+chk_transcribe = None
+cmb_speakers = None
+transcribe_var = None
+speakers_var = None
 
 
 def resource_path(rel):
@@ -194,6 +205,8 @@ def start_convert():
     btn_pick.config(state="disabled")
     btn_main.config(state="disabled")
     btn_cancel.config(state="normal")
+    chk_transcribe.config(state="disabled")
+    cmb_speakers.config(state="disabled")
     label_status.config(text="准备转换…", fg=COLOR_BUSY)
     job_q.put((list(selected), out_dir, job_token))
     poll_progress(job_token)
@@ -242,17 +255,47 @@ def poll_progress(token):
             elif kind == "error":
                 finish_convert(0, [], 0, error=msg[2])
                 return
+            elif kind == "t-status":
+                _, _, i, total, name = msg
+                label_status.config(text=f"正在转写 {i}/{total}：{name}",
+                                    fg=COLOR_BUSY)
+            elif kind == "t-dlstart":
+                progress.config(mode="indeterminate")
+                progress.start(80)
+                label_status.config(text="正在下载转写模型…", fg=COLOR_BUSY)
+            elif kind == "t-dlprog":
+                label_status.config(
+                    text=f"正在下载转写模型… 已接收 {msg[2] / 1048576:.0f} MB",
+                    fg=COLOR_BUSY)
+            elif kind == "t-dlend":
+                progress.stop()
+                progress.config(mode="determinate")
+                set_progress(0)
+                label_status.config(text="模型就绪，开始转写…", fg=COLOR_BUSY)
+            elif kind == "t-done":
+                _, _, count, txt_dir = msg
+                finish_transcribe(count, txt_dir)
+                return
+            elif kind == "t-error":
+                finish_transcribe(0, None, error=msg[2])
+                return
     except queue.Empty:
         pass
     root.after(100, lambda: poll_progress(token))
 
 
-def finish_convert(ok, failed, total, cancelled=False, error=None):
+def finish_convert(ok, failed, total, cancelled=False, error=None, note=None):
     global converting
+    if (note is None and transcribe_var.get()
+            and not cancelled and not error and ok > 0):
+        begin_transcribe(ok, failed, total)  # 完成弹窗延后到转写结束
+        return
     converting = False
     btn_pick.config(state="normal")
     btn_main.config(state="normal")
     btn_cancel.config(state="disabled")
+    chk_transcribe.config(state="normal")
+    cmb_speakers.config(state="readonly")
     if error:
         label_status.config(text=f"出错了：{error}", fg=COLOR_ERROR)
         messagebox.showerror("转换出错", error)
@@ -271,13 +314,89 @@ def finish_convert(ok, failed, total, cancelled=False, error=None):
         messagebox.showwarning("部分失败", f"成功 {ok} 个，失败 {len(failed)} 个：\n{names}")
     else:
         label_status.config(text=f"全部完成！共 {ok} 个视频已转换", fg=COLOR_OK)
-        messagebox.showinfo("完成", "全部转换完毕！")
+        messagebox.showinfo("完成", "全部转换完毕！" + (f"\n{note}" if note else ""))
+    if note:
+        label_status.config(text=label_status.cget("text") + f"（{note}）")
+
+
+def begin_transcribe(ok, failed, total):
+    """转换成功后进入转写阶段：模型不齐先问是否下载，然后后台线程跑转写。"""
+    global job_token, conv_summary
+    btn_cancel.config(state="disabled")  # 转写流水线不支持中途取消
+    set_progress(0)
+    from transcribe.models import diar_ready  # 轻量模块，首次用到再导入
+    if not diar_ready(MODEL_DIR) and not messagebox.askyesno(
+            "下载转写模型",
+            "转写需要说话人识别模型（约 35MB），当前尚未下载。\n\n"
+            "现在下载吗？\n（选「否」则跳过转写，仅保留 MP3）"):
+        finish_convert(ok, failed, total, note="已跳过转写，仅保留 MP3")
+        return
+    conv_summary = (ok, failed, total)
+    job_token += 1
+    token = job_token
+    speakers = speakers_var.get()
+    num_speakers = None if speakers == "自动" else int(speakers)
+    label_status.config(text="正在准备转写…", fg=COLOR_BUSY)
+    threading.Thread(target=_transcribe_worker,
+                     args=(token, num_speakers), daemon=True).start()
+    poll_progress(token)
+
+
+def _transcribe_worker(token, num_speakers):
+    """转写后台线程：必要时先下载模型，再转写整个 mp3 输出目录。"""
+    try:
+        from transcribe.models import diar_ready, ensure_diar_models, ModelDownloadError
+        if not diar_ready(MODEL_DIR):
+            result_q.put(("t-dlstart", token))
+            def dl_cb(got):
+                result_q.put(("t-dlprog", token, got))
+            try:
+                ensure_diar_models(MODEL_DIR, progress_cb=dl_cb)
+            except ModelDownloadError as exc:
+                result_q.put(("t-error", token, str(exc)))
+                return
+            result_q.put(("t-dlend", token))
+        from transcribe.pipeline import transcribe_folder  # 重依赖，首次用到才加载
+        txt_dir = os.path.join(out_dir, TRANSCRIPT_DIR)
+        def cb(i, total, name):
+            result_q.put(("t-status", token, i, total, name))
+            result_q.put(("progress", token, int((i - 1) / total * 100)))
+        results = transcribe_folder(
+            out_dir, txt_dir, MODEL_DIR, resource_path("ffmpeg.exe"), TEMP_DIR,
+            num_speakers=num_speakers, progress_cb=cb)
+        result_q.put(("t-done", token, len(results), txt_dir))
+    except Exception as exc:  # 线程不能死，任何异常都转成错误消息
+        result_q.put(("t-error", token, str(exc)))
+
+
+def finish_transcribe(count, txt_dir, error=None):
+    global converting
+    converting = False
+    progress.stop()
+    progress.config(mode="determinate")
+    btn_pick.config(state="normal")
+    btn_main.config(state="normal")
+    btn_cancel.config(state="disabled")
+    chk_transcribe.config(state="normal")
+    cmb_speakers.config(state="readonly")
+    ok, failed, total = conv_summary
+    conv = f"转换成功 {ok}/{total}" + (f"，失败 {len(failed)} 个" if failed else "")
+    if error:
+        set_progress(0)
+        label_status.config(text=f"转写出错：{error}", fg=COLOR_ERROR)
+        messagebox.showerror("转写出错",
+                             f"{error}\n\n（{conv}，MP3 已保留在 {out_dir}）")
+    else:
+        set_progress(100)
+        label_status.config(text=f"全部完成！{conv}，转写 {count} 个", fg=COLOR_OK)
+        messagebox.showinfo(
+            "完成", f"{conv}\n转写完成：{count} 个文本\n输出目录：{txt_dir}")
 
 
 def on_closing():
     global cancel_requested
     if converting and not messagebox.askyesno(
-            "退出程序", "正在转换中，退出会中断当前任务哦~\n\n确定退出吗？"):
+            "退出程序", "正在处理任务，退出会中断当前任务哦~\n\n确定退出吗？"):
         return
     cancel_requested = True
     proc = current_proc
@@ -311,10 +430,11 @@ def register_drop(widget):
 def setup_gui():
     global root, drop_area, label_path, label_status, label_pct, progress
     global btn_pick, btn_main, btn_cancel
+    global chk_transcribe, cmb_speakers, transcribe_var, speakers_var
 
     root = TkinterDnD.Tk()
     root.title("视频转MP3")
-    root.geometry("480x340")
+    root.geometry("480x372")
     root.resizable(False, False)
 
     style = ttk.Style(root)
@@ -344,6 +464,20 @@ def setup_gui():
                          font=("Microsoft YaHei UI", 9))
     label_pct.pack(side="left")
 
+    transcribe_var = tk.IntVar(value=0)
+    speakers_var = tk.StringVar(value="自动")
+    opts = tk.Frame(root)
+    opts.pack(pady=(2, 0))
+    chk_transcribe = ttk.Checkbutton(
+        opts, text="转写文字（识别说话人）", variable=transcribe_var)
+    chk_transcribe.pack(side="left", padx=(0, 12))
+    tk.Label(opts, text="说话人数：", fg="#555555",
+             font=("Microsoft YaHei UI", 9)).pack(side="left")
+    cmb_speakers = ttk.Combobox(
+        opts, textvariable=speakers_var, values=("自动", "2", "3", "4", "5"),
+        width=4, state="readonly")
+    cmb_speakers.pack(side="left")
+
     btns = tk.Frame(root)
     btns.pack(pady=12)
     btn_pick = ttk.Button(btns, text="选择文件夹", command=select_folder, width=12)
@@ -361,7 +495,14 @@ def setup_gui():
     return root
 
 
+def clear_temp_dir():
+    """启动时清空 temp/，避免上次中断残留的 wav 越积越多。"""
+    shutil.rmtree(TEMP_DIR, ignore_errors=True)
+    os.makedirs(TEMP_DIR, exist_ok=True)
+
+
 def main():
+    clear_temp_dir()
     setup_gui()
     threading.Thread(target=worker, daemon=True).start()
     root.mainloop()
