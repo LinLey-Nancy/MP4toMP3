@@ -24,7 +24,10 @@ def main():
     ap.add_argument("--speakers", type=int, default=None)
     args = ap.parse_args()
 
-    base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    if getattr(sys, "frozen", False):
+        base = os.path.dirname(sys.executable)
+    else:
+        base = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     model_dir = os.path.join(base, "models")
     if not diar_ready(model_dir):
         try:

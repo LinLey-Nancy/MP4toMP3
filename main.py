@@ -15,7 +15,8 @@ VIDEO_EXT = (".mp4", ".mkv", ".avi", ".mov", ".flv", ".wmv",
 OUTPUT_DIR = "mp3_output"
 TRANSCRIPT_DIR = "transcript_output"
 
-PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
+PROJECT_ROOT = (os.path.dirname(sys.executable) if getattr(sys, "frozen", False)
+                else os.path.dirname(os.path.abspath(__file__)))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 TEMP_DIR = os.path.join(PROJECT_ROOT, "temp")
 
