@@ -1,4 +1,5 @@
 faster-whisper==1.2.1
+av==13.1.0
 sherpa-onnx==1.13.8
 pytest==8.3.4
 pyinstaller==6.11.1
