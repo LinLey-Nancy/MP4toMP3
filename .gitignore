@@ -1,5 +1,6 @@
 .venv/
 models/
+demo/
 temp/
 mp3_output/
 transcript_output/
