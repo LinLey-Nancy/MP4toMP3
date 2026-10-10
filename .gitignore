@@ -1,0 +1,9 @@
+.venv/
+models/
+temp/
+mp3_output/
+transcript_output/
+dist/
+build/
+__pycache__/
+*.spec
