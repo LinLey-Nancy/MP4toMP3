@@ -1,4 +1,5 @@
 import hashlib
+import http.client
 import json
 import os
 import urllib.request
@@ -59,39 +60,60 @@ def diar_ready(model_dir: str) -> bool:
 
 
 def _download_file(url: str, dest: str, progress_cb=None) -> None:
-    """支持断点续传的单文件下载。"""
+    """支持断点续传的单文件下载；落地前校验本次接收字节数与 Content-Length。"""
     tmp = dest + ".part"
     got = os.path.getsize(tmp) if os.path.exists(tmp) else 0
     req = urllib.request.Request(url, headers={"Range": f"bytes={got}-"})
-    with urllib.request.urlopen(req, timeout=30) as resp, open(tmp, "ab") as f:
-        while True:
-            chunk = resp.read(1 << 20)
-            if not chunk:
-                break
-            f.write(chunk)
-            got += len(chunk)
-            if progress_cb:
-                progress_cb(got)
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        # 续传请求被服务器忽略（未回 206）时截断重写，避免残片与新内容拼接
+        if got and getattr(resp, "status", None) != 206:
+            got = 0
+        received = 0
+        with open(tmp, "ab" if got else "wb") as f:
+            while True:
+                chunk = resp.read(1 << 20)
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+                received += len(chunk)
+                if progress_cb:
+                    progress_cb(got)
+        expected = resp.headers.get("Content-Length")
+    try:
+        expected = int(expected) if expected is not None else None
+    except (TypeError, ValueError):
+        expected = None
+    if expected is not None and received != expected:
+        # 连接提前关闭时 read 可能静默返回空，不能把截断文件当作完成
+        raise http.client.IncompleteRead(b"", expected - received)
     os.replace(tmp, dest)
 
 
 def ensure_diar_models(model_dir: str, progress_cb=None) -> None:
     if diar_ready(model_dir):
         return
-    os.makedirs(model_dir, exist_ok=True)
     try:
+        os.makedirs(model_dir, exist_ok=True)
+        manifest = _load_manifest(model_dir)
         for key, path in diar_paths(model_dir).items():
+            expected_sha = manifest.get(os.path.basename(path))
             if os.path.exists(path):
-                continue
+                if expected_sha and _sha256(path) != expected_sha:
+                    os.remove(path)  # sha 不符的坏文件删除后重下
+                else:
+                    continue
             last_err = None
             for url in DIAR_URLS[key]:
                 try:
                     _download_file(url, path, progress_cb)
+                    if expected_sha and _sha256(path) != expected_sha:
+                        raise OSError(f"sha256 校验失败：{os.path.basename(path)}")
                     last_err = None
                     break
-                except OSError as e:
+                except (OSError, http.client.HTTPException) as e:
                     last_err = e
             if last_err is not None:
                 raise last_err
-    except OSError as e:
+    except (OSError, http.client.HTTPException) as e:
         raise ModelDownloadError(f"模型下载失败：{e}。请检查网络后重试。") from e
