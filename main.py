@@ -19,6 +19,13 @@ PROJECT_ROOT = os.path.dirname(os.path.abspath(__file__))
 MODEL_DIR = os.path.join(PROJECT_ROOT, "models")
 TEMP_DIR = os.path.join(PROJECT_ROOT, "temp")
 
+ASR_PROFILE = "small"
+ASR_CACHE_DIRS = {
+    "small": "models--Systran--faster-whisper-small",
+    "turbo": "models--Systran--faster-whisper-large-v3-turbo",
+}
+ASR_MODEL_SIZE = {"small": "约 460MB", "turbo": "约 1.6GB"}
+
 COLOR_IDLE = "#666666"
 COLOR_BUSY = "#2b6cb0"
 COLOR_OK = "#2e7d32"
@@ -257,8 +264,17 @@ def poll_progress(token):
                 return
             elif kind == "t-status":
                 _, _, i, total, name = msg
+                if str(progress.cget("mode")) == "indeterminate":
+                    progress.stop()  # ASR 模型下载结束，回到正常转写进度
+                    progress.config(mode="determinate")
                 label_status.config(text=f"正在转写 {i}/{total}：{name}",
                                     fg=COLOR_BUSY)
+            elif kind == "t-asr-dl":
+                progress.config(mode="indeterminate")
+                progress.start(80)
+                label_status.config(
+                    text=f"正在下载语音识别模型（{msg[2]}，仅首次）…",
+                    fg=COLOR_BUSY)
             elif kind == "t-dlstart":
                 progress.config(mode="indeterminate")
                 progress.start(80)
@@ -273,11 +289,11 @@ def poll_progress(token):
                 set_progress(0)
                 label_status.config(text="模型就绪，开始转写…", fg=COLOR_BUSY)
             elif kind == "t-done":
-                _, _, count, txt_dir = msg
-                finish_transcribe(count, txt_dir)
+                _, _, count, total, txt_dir = msg
+                finish_transcribe(count, total, txt_dir)
                 return
             elif kind == "t-error":
-                finish_transcribe(0, None, error=msg[2])
+                finish_transcribe(0, 0, None, error=msg[2])
                 return
     except queue.Empty:
         pass
@@ -327,7 +343,8 @@ def begin_transcribe(ok, failed, total):
     from transcribe.models import diar_ready  # 轻量模块，首次用到再导入
     if not diar_ready(MODEL_DIR) and not messagebox.askyesno(
             "下载转写模型",
-            "转写需要说话人识别模型（约 35MB），当前尚未下载。\n\n"
+            "转写需要说话人识别模型（约 35MB），当前尚未下载。\n"
+            f"首次转写还需下载语音识别模型（{ASR_MODEL_SIZE[ASR_PROFILE]}）。\n\n"
             "现在下载吗？\n（选「否」则跳过转写，仅保留 MP3）"):
         finish_convert(ok, failed, total, note="已跳过转写，仅保留 MP3")
         return
@@ -340,6 +357,18 @@ def begin_transcribe(ok, failed, total):
     threading.Thread(target=_transcribe_worker,
                      args=(token, num_speakers), daemon=True).start()
     poll_progress(token)
+
+
+def _asr_model_cached(model_dir, profile):
+    """检测 ASR 模型是否已缓存：HF 缓存目录存在且 blobs 里有实际内容。"""
+    blobs = os.path.join(model_dir, ASR_CACHE_DIRS[profile], "blobs")
+    if not os.path.isdir(blobs):
+        return False
+    try:
+        return any(os.path.getsize(os.path.join(blobs, f)) > (1 << 20)
+                   for f in os.listdir(blobs))
+    except OSError:
+        return False
 
 
 def _transcribe_worker(token, num_speakers):
@@ -356,20 +385,23 @@ def _transcribe_worker(token, num_speakers):
                 result_q.put(("t-error", token, str(exc)))
                 return
             result_q.put(("t-dlend", token))
+        if not _asr_model_cached(MODEL_DIR, ASR_PROFILE):
+            result_q.put(("t-asr-dl", token, ASR_MODEL_SIZE[ASR_PROFILE]))
         from transcribe.pipeline import transcribe_folder  # 重依赖，首次用到才加载
         txt_dir = os.path.join(out_dir, TRANSCRIPT_DIR)
+        total = sum(1 for f in os.listdir(out_dir) if f.lower().endswith(".mp3"))
         def cb(i, total, name):
             result_q.put(("t-status", token, i, total, name))
             result_q.put(("progress", token, int((i - 1) / total * 100)))
         results = transcribe_folder(
             out_dir, txt_dir, MODEL_DIR, resource_path("ffmpeg.exe"), TEMP_DIR,
-            num_speakers=num_speakers, progress_cb=cb)
-        result_q.put(("t-done", token, len(results), txt_dir))
+            profile=ASR_PROFILE, num_speakers=num_speakers, progress_cb=cb)
+        result_q.put(("t-done", token, len(results), total, txt_dir))
     except Exception as exc:  # 线程不能死，任何异常都转成错误消息
         result_q.put(("t-error", token, str(exc)))
 
 
-def finish_transcribe(count, txt_dir, error=None):
+def finish_transcribe(count, t_total, txt_dir, error=None):
     global converting
     converting = False
     progress.stop()
@@ -379,13 +411,29 @@ def finish_transcribe(count, txt_dir, error=None):
     btn_cancel.config(state="disabled")
     chk_transcribe.config(state="normal")
     cmb_speakers.config(state="readonly")
-    ok, failed, total = conv_summary
-    conv = f"转换成功 {ok}/{total}" + (f"，失败 {len(failed)} 个" if failed else "")
+    ok, failed, conv_total = conv_summary
+    conv = f"转换成功 {ok}/{conv_total}" + (f"，失败 {len(failed)} 个" if failed else "")
     if error:
         set_progress(0)
         label_status.config(text=f"转写出错：{error}", fg=COLOR_ERROR)
         messagebox.showerror("转写出错",
                              f"{error}\n\n（{conv}，MP3 已保留在 {out_dir}）")
+    elif t_total > 0 and count == 0:
+        set_progress(0)
+        label_status.config(text=f"转写失败：{t_total} 个全部未成功", fg=COLOR_ERROR)
+        messagebox.showwarning(
+            "转写失败",
+            f"{t_total} 个 MP3 全部转写失败。\n"
+            "请检查网络（首次转写需下载语音识别模型）后重试，或查看日志。\n\n"
+            f"（{conv}，MP3 已保留在 {out_dir}）")
+    elif count < t_total:
+        set_progress(100)
+        label_status.config(
+            text=f"完成：{conv}，转写成功 {count}/{t_total} 个", fg=COLOR_WARN)
+        messagebox.showwarning(
+            "部分转写失败",
+            f"{conv}\n转写成功 {count}/{t_total} 个，失败 {t_total - count} 个（已跳过）\n"
+            f"输出目录：{txt_dir}")
     else:
         set_progress(100)
         label_status.config(text=f"全部完成！{conv}，转写 {count} 个", fg=COLOR_OK)
