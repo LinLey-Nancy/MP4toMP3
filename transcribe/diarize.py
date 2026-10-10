@@ -1,3 +1,4 @@
+import logging
 import os
 import subprocess
 import wave
@@ -6,6 +7,8 @@ import numpy as np
 import sherpa_onnx
 
 from .models import diar_paths
+
+logger = logging.getLogger(__name__)
 
 
 def extract_wav(ffmpeg_path: str, audio_path: str, temp_dir: str) -> str:
@@ -47,21 +50,21 @@ def _create_diarizer(model_dir: str, num_speakers: int | None):
     return sherpa_onnx.OfflineSpeakerDiarization(config)
 
 
-def diarize_audio(wav_path: str, model_dir: str, num_speakers: int | None = None):
+def diarize_audio(wav_path: str, model_dir: str, num_speakers: int | None = None) -> list[dict]:
     try:
         samples, _rate = _read_wav(wav_path)
         sd = _create_diarizer(model_dir, num_speakers)
         result = sd.process(samples)
-        return sorted(
-            ({"start": s.start, "end": s.end, "speaker": s.speaker} for s in result),
-            key=lambda s: s["start"],
-        )
-    except Exception:
+        # result 不可迭代；sort_by_start_time() 返回按起始时间升序的 segment 列表
+        return [{"start": s.start, "end": s.end, "speaker": s.speaker}
+                for s in result.sort_by_start_time()]
+    except Exception as e:
         # 无人声 / 音频过短 / 推理失败：返回空，由对齐层兜底为说话人1
+        logger.warning("说话人分离失败，返回空结果：%s: %s", type(e).__name__, e)
         return []
 
 
 def diarize_mp3(mp3_path: str, model_dir: str, ffmpeg_path: str, temp_dir: str,
-                num_speakers: int | None = None):
+                num_speakers: int | None = None) -> list[dict]:
     wav_path = extract_wav(ffmpeg_path, mp3_path, temp_dir)
     return diarize_audio(wav_path, model_dir, num_speakers)
