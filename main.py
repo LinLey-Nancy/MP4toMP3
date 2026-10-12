@@ -1,4 +1,5 @@
 import os
+import logging
 import queue
 import re
 import shutil
@@ -550,7 +551,24 @@ def clear_temp_dir():
     os.makedirs(TEMP_DIR, exist_ok=True)
 
 
+def setup_logging():
+    """windowed 打包版没有控制台，日志必须落文件，UI 里的「查看日志」才有着落。
+
+    冻结时写到 exe 同级目录，源码运行时写到项目根（均为 PROJECT_ROOT）。
+    已有 handler（调试器、重复调用、测试注入）时不重复配置。
+    """
+    if logging.getLogger().handlers:
+        return
+    logging.basicConfig(
+        filename=os.path.join(PROJECT_ROOT, "transcribe.log"),
+        level=logging.INFO,
+        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
+        encoding="utf-8",
+    )
+
+
 def main():
+    setup_logging()
     clear_temp_dir()
     setup_gui()
     threading.Thread(target=worker, daemon=True).start()

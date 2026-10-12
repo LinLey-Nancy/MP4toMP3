@@ -14,13 +14,18 @@ def transcribe_one(mp3_path, out_dir, model_dir, ffmpeg_path, temp_dir,
     asr_fn = asr_fn or transcribe_audio
     diar_fn = diar_fn or diarize_mp3
     try:
+        out_path = os.path.join(
+            out_dir, os.path.splitext(os.path.basename(mp3_path))[0] + ".txt")
+        # txt 已存在且不旧于源 mp3 时直接复用：重复运行不再重转历史文件，
+        # 上次失败的文件没有 txt，下次自动重试
+        if (os.path.exists(out_path)
+                and os.path.getmtime(out_path) >= os.path.getmtime(mp3_path)):
+            return out_path
         # 统一约定：diar_fn 直接收 mp3 路径，内部自己抽 wav
         diar = diar_fn(mp3_path, model_dir, ffmpeg_path, temp_dir, num_speakers)
         asr = asr_fn(mp3_path, model_dir, profile)
         labeled = merge_adjacent(assign_speakers(asr, diar))
         os.makedirs(out_dir, exist_ok=True)
-        out_path = os.path.join(
-            out_dir, os.path.splitext(os.path.basename(mp3_path))[0] + ".txt")
         with open(out_path, "w", encoding="utf-8") as f:
             f.write(format_transcript(labeled))
         return out_path

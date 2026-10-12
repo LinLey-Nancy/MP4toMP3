@@ -37,6 +37,20 @@ def test_diar_ready_false_on_sha_mismatch(tmp_path):
     assert diar_ready(str(tmp_path)) is False
 
 
+# --- 终审修复：损坏的 manifest.json 不得抛异常，按无清单处理（仅查存在性） ---
+
+
+def test_diar_ready_tolerates_corrupted_manifest(tmp_path):
+    _write_fake_models(tmp_path)
+    (tmp_path / "manifest.json").write_bytes(b"\xff\xfe garbage-not-json {{{")
+    assert diar_ready(str(tmp_path)) is True  # 模型文件在，无清单可校验即视为就绪
+
+
+def test_diar_ready_missing_models_with_corrupted_manifest(tmp_path):
+    (tmp_path / "manifest.json").write_bytes(b"\xff\xfe garbage-not-json {{{")
+    assert diar_ready(str(tmp_path)) is False  # 模型文件不存在，仍不就绪
+
+
 def test_diar_paths(tmp_path):
     p = diar_paths(str(tmp_path))
     assert p["segmentation"].endswith(DIAR_FILES["segmentation"])

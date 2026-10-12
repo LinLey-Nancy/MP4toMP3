@@ -1,8 +1,11 @@
 import hashlib
 import http.client
 import json
+import logging
 import os
 import urllib.request
+
+logger = logging.getLogger(__name__)
 
 ASR_PROFILES = {"small": "small", "turbo": "large-v3-turbo"}
 
@@ -44,8 +47,14 @@ def _load_manifest(model_dir: str) -> dict:
     p = os.path.join(model_dir, "manifest.json")
     if not os.path.exists(p):
         return {}
-    with open(p, encoding="utf-8") as f:
-        return json.load(f)
+    try:
+        with open(p, encoding="utf-8") as f:
+            return json.load(f)
+    except (OSError, ValueError) as e:
+        # 损坏的清单视为无清单（JSONDecodeError 是 ValueError 子类），
+        # 不能在 tkinter 回调里裸抛，否则 converting 状态卡死
+        logger.warning("manifest.json 损坏，按无清单处理: %s", e)
+        return {}
 
 
 def diar_ready(model_dir: str) -> bool:

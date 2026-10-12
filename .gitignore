@@ -9,3 +9,4 @@ build/
 __pycache__/
 *.spec
 .codegraph/
+transcribe.log
