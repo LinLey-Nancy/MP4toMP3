@@ -58,12 +58,18 @@ REM ---- 2. PyInstaller onedir build ----
 REM sherpa_onnx / ctranslate2 have no hooks in pyinstaller-hooks-contrib:
 REM their native DLLs (sherpa_onnx\lib\*.dll, ctranslate2.dll, libiomp5md.dll)
 REM are not picked up by import analysis, so collect the whole packages.
+REM numpy 2.x: numpy._core._exceptions is imported lazily and missed by PYZ
+REM analysis -> transcribe fails with ModuleNotFoundError in the frozen app.
+REM faster_whisper: package data assets\silero_vad_v6.onnx (VAD model) is not
+REM collected by default -> vad_filter=True crashes in the frozen app.
 echo [2/5] PyInstaller onedir build (this takes a few minutes)...
 "%PY%" -m PyInstaller --noconfirm --clean --onedir --windowed ^
     --name "%APP%" ^
     --add-binary "ffmpeg.exe;." ^
     --collect-all sherpa_onnx ^
     --collect-all ctranslate2 ^
+    --collect-data faster_whisper ^
+    --hidden-import numpy._core._exceptions ^
     main.py
 if errorlevel 1 (
     echo.

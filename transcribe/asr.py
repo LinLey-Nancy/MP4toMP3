@@ -1,3 +1,4 @@
+import logging
 import os
 
 os.environ.setdefault("HF_ENDPOINT", "https://hf-mirror.com")  # 国内镜像兜底
@@ -14,8 +15,9 @@ def _create_model(model_name: str, model_dir: str):
     try:
         return WhisperModel(model_name, device="auto", compute_type="int8",
                             download_root=model_dir)
-    except Exception:
+    except Exception as e:
         # 探测到 N 卡但 CUDA/cuDNN 动态库缺失 → 回退纯 CPU
+        logging.getLogger(__name__).warning("CUDA 初始化失败，回退 CPU：%s", e)
         return WhisperModel(model_name, device="cpu", compute_type="int8",
                             download_root=model_dir)
 
